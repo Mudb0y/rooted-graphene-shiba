@@ -2,10 +2,11 @@
 
 # First install on a Pixel 8. One stage per run, in this order:
 #
-#   fetch, bootloader, stock, patched, sideload, lock
+#   fetch, bootloader, stock, patched, lock
 #
-# "status" reports what the phone is doing right now. Output from the tools
-# goes to the log, so the terminal only carries what needs hearing.
+# "sideload" is optional, between patched and lock: it rehearses an update
+# through recovery. "status" reports what the phone is doing right now. Output
+# from the tools goes to the log, so the terminal only carries what needs hearing.
 
 set -euo pipefail
 
@@ -27,7 +28,9 @@ OTA_CERT="$project/public/ota.crt"
 GRAPHENEOS_SIGNER='contact@grapheneos.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUg/m5CoP83b0rfSCzYSVA4cw4ir49io5GPoxbgxdJE'
 # avbroot's fastboot set only covers what avbroot itself patches, which leaves out vendor and product. The build
 # changes both, and a slot that mixes them with the stock images fails verity before Android starts. Flashing
-# every dynamic partition keeps that true whatever a later build touches.
+# everything else verified boot covers from the patched update too leaves the slot exactly as a sideload would,
+# so locking does not depend on one, and an unlocked bootloader cannot hide a mismatch until the lock.
+STATIC=(dtbo pvmfw vendor_kernel_boot)
 DYNAMIC=(product vendor system_ext system_dlkm vendor_dlkm)
 
 mkdir -p "$WORK"
@@ -150,7 +153,7 @@ wait_authorized() {
 }
 
 need_files() {
-  if [[ ! -f "$WORK/version" || ! -f "$WORK/ota" || ! -d "$WORK/extracted-dynamic" ]]; then
+  if [[ ! -f "$WORK/version" || ! -f "$WORK/ota" || ! -d "$WORK/extracted-rest" ]]; then
     fail "Run the fetch stage first."
   fi
   VERSION=$(<"$WORK/version")
@@ -213,15 +216,15 @@ stage_fetch() {
     --public-key-avb "$AVB_KEY" --cert-ota "$OTA_CERT" ||
     fail "The patched update is not signed with the keys in $project/public."
 
-  rm -rf "${WORK:?}/$factory" "$WORK/extracted" "$WORK/extracted-dynamic"
+  rm -rf "${WORK:?}/$factory" "$WORK/extracted" "$WORK/extracted-rest"
   quiet unzip -q "$WORK/$factory.zip" -d "$WORK"
   quiet "$WORK/.tmp/avbroot" ota extract --input "$WORK/$(basename "$url")" \
     --directory "$WORK/extracted" --fastboot
-  for partition in "${DYNAMIC[@]}"; do
+  for partition in "${STATIC[@]}" "${DYNAMIC[@]}"; do
     extract+=(--partition "$partition")
   done
   quiet "$WORK/.tmp/avbroot" ota extract --input "$WORK/$(basename "$url")" \
-    --directory "$WORK/extracted-dynamic" "${extract[@]}"
+    --directory "$WORK/extracted-rest" "${extract[@]}"
 
   echo "$version" >"$WORK/version"
   echo "$WORK/$(basename "$url")" >"$WORK/ota"
@@ -311,6 +314,10 @@ stage_patched() {
 
   echo "start: flashing the patched system, about five minutes, leave the phone alone"
 
+  for partition in "${STATIC[@]}"; do
+    quiet fastboot flash "$partition" "$WORK/extracted-rest/$partition.img" ||
+      fail "Flashing $partition failed. The phone is still unlocked. The stock stage puts plain GrapheneOS back."
+  done
   ANDROID_PRODUCT_OUT="$WORK/extracted" quiet fastboot flashall --skip-reboot ||
     fail "Flashing the patched system failed. The phone is still unlocked. The stock stage puts plain GrapheneOS back."
   # Dynamic partitions can only be written from the fastboot that runs inside recovery
@@ -319,7 +326,7 @@ stage_patched() {
     wait_mode 120 fastbootd || fail "The phone did not enter the second fastboot mode."
   fi
   for partition in "${DYNAMIC[@]}"; do
-    quiet fastboot flash "$partition" "$WORK/extracted-dynamic/$partition.img" ||
+    quiet fastboot flash "$partition" "$WORK/extracted-rest/$partition.img" ||
       fail "Flashing $partition failed. The phone is still unlocked. The stock stage puts plain GrapheneOS back."
   done
   quiet fastboot reboot-bootloader
@@ -350,7 +357,7 @@ stage_patched() {
   echo "The accessibility shortcut points at: $(adb shell cmd overlay lookup android android:string/config_defaultAccessibilityService 2>&1 | tr -d '\r')"
   echo "Installed build: $(adb_prop ro.build.version.incremental), slot $(adb_prop ro.boot.slot_suffix)"
 
-  echo "result: the patched system runs. If SandFly and your voices work, run the sideload stage next."
+  echo "result: the patched system runs. If SandFly and your voices work, run the lock stage next."
 }
 
 stage_sideload() {
@@ -400,11 +407,17 @@ stage_sideload() {
 stage_lock() {
   local ability status deadline current
 
+  if [[ "$(mode)" == device ]]; then
+    quiet adb reboot bootloader
+    wait_mode 120 bootloader || fail "The phone did not reach the bootloader."
+  fi
   need_unlocked_bootloader
 
+  # Locking wipes the phone, which must not happen in the middle of a merge
   status=$(fb_var snapshot-update-status)
   if [[ "$status" != none ]]; then
-    fail "An update is still being merged, state '$status'. Run the sideload stage again."
+    quiet fastboot reboot || true
+    fail "An update is still being merged, state '$status'. The phone is starting again. Leave it running for ten minutes, then run this stage again."
   fi
 
   # With OEM unlocking off, a locked phone that fails to start cannot be rescued
