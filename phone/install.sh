@@ -171,7 +171,7 @@ need_unlocked_bootloader() {
 
 download() {
   if [[ ! -f "$2" ]]; then
-    quiet curl --fail -L -o "$2.part" "$1" || fail "Could not download $1"
+    quiet curl --fail -sSL -o "$2.part" "$1" || fail "Could not download $1"
     mv "$2.part" "$2"
   fi
 }
