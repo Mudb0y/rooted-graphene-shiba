@@ -1,0 +1,6 @@
+/.tmp/
+/*.key
+/*.crt
+/*.bin
+/*.pass
+/*.zip
