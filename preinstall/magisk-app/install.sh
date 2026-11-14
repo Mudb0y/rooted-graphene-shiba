@@ -35,24 +35,25 @@ installed() {
   done
 }
 
-current() {
+# Magisk sorts out its app at this same moment: it removes one signed for another Magisk and puts its placeholder
+# there, and a placeholder that was already queued lands on top of a fresh install. So only stop once the app has
+# been right twice, some seconds apart.
+installs=0
+right=0
+while :; do
   have=$(installed)
-  [ -n "$have" ] && [ "$have" -ge "$want" ]
-}
-
-if current; then
-  exit 0
-fi
-
-for attempt in 1 2 3; do
-  log -t "$TAG" "Installing Magisk app $want over ${have:-nothing}, attempt $attempt: $(pm install -g -r "$APK" 2>&1)"
-  # Magisk installs its placeholder at this same moment. One that was already queued behind this install lands
-  # on top of it, so look again once it has had time to.
-  sleep 10
-  if current; then
-    exit 0
+  if [ -n "$have" ] && [ "$have" -ge "$want" ]; then
+    right=$((right + 1))
+    if [ "$right" -ge 2 ]; then
+      exit 0
+    fi
+  elif [ "$installs" -ge 3 ]; then
+    log -p e -t "$TAG" "Magisk app is at ${have:-nothing} instead of $want after $installs installs"
+    exit 1
+  else
+    right=0
+    installs=$((installs + 1))
+    log -t "$TAG" "Installing Magisk app $want over ${have:-nothing}: $(pm install -g -r "$APK" 2>&1)"
   fi
+  sleep 15
 done
-
-log -p e -t "$TAG" "Magisk app is still at ${have:-nothing} instead of $want"
-exit 1
