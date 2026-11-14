@@ -4,3 +4,4 @@
 /*.bin
 /*.pass
 /*.zip
+__pycache__/
