@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+
+  workflow_dispatch:
+    inputs:
+      ota-version:
+        description: GrapheneOS version to build instead of the latest
+        required: false
+      force-build:
+        description: Build and upload even if the release already has this flavor
+        type: boolean
+        required: false
+      force-ota-server-upload:
+        description: Point the OTA server at this build even if it already lists this version
+        type: boolean
+        required: false
+      upload-test-ota:
+        description: Publish to the test folder of the OTA server
+        type: boolean
+        required: false
+      skip-release:
+        description: Build only, publish nothing
+        type: boolean
+        required: false
+      debug:
+        description: Trace every command in the log, which anyone can read
+        type: boolean
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DEVICE_ID: shiba
+      MAGISK_PREINIT_DEVICE: sda10
+      SKIP_PIXINCREATE: 'false'
+      OTA_VERSION: ${{ inputs.ota-version }}
+      FORCE_BUILD: ${{ inputs.force-build }}
+      FORCE_OTA_SERVER_UPLOAD: ${{ inputs.force-ota-server-upload }}
+      UPLOAD_TEST_OTA: ${{ inputs.upload-test-ota }}
+      SKIP_RELEASE: ${{ inputs.skip-release }}
+      DEBUG: ${{ inputs.debug && '1' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The OTA server lives on the gh-pages branch
+          fetch-depth: 0
+      - name: Free disk space
+        # Three flavors of a 2 GB OTA plus the unpacked images do not fit next to the preinstalled toolchains
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - name: Put apksigner on PATH
+        run: find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1 >> "$GITHUB_PATH"
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          PASSPHRASE_AVB: ${{ secrets.PASSPHRASE_AVB }}
+          PASSPHRASE_OTA: ${{ secrets.PASSPHRASE_OTA }}
+          KEY_AVB_BASE64: ${{ secrets.KEY_AVB_BASE64 }}
+          KEY_OTA_BASE64: ${{ secrets.KEY_OTA_BASE64 }}
+          CERT_OTA_BASE64: ${{ secrets.CERT_OTA_BASE64 }}
+        run: |
+          if [[ "$SKIP_RELEASE" == 'true' ]]; then
+            bash -c '. ./rooted-ota.sh && createRootedOta && createOtaServerData'
+          else
+            bash -c '. ./rooted-ota.sh && createAndReleaseRootedOta'
+          fi
