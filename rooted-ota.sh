@@ -75,6 +75,10 @@ SKIP_OTA_SERVER_UPLOAD=${SKIP_OTA_SERVER_UPLOAD:-'false'}
 SKIP_MODULES=${SKIP_MODULES:-'false'}
 # Upload OTA to test folder on OTA server
 UPLOAD_TEST_OTA=${UPLOAD_TEST_OTA:-false}
+# Skip adding the apps listed in preinstall/apps.conf and the overlays in preinstall/overlay to the OTA
+SKIP_PREINSTALL=${SKIP_PREINSTALL:-'false'}
+# Run the patch step with the host's python3 instead of in docker. Needs pydantic and tomlkit.
+PATCH_NATIVE=${PATCH_NATIVE:-'false'}
 
 OTA_CHANNEL=${OTA_CHANNEL:-stable-security-preview} # Alternative: 'stable' or 'alpha'
 NO_COLOR=${NO_COLOR:-''}
@@ -95,6 +99,10 @@ AFSR_VERSION=2.1.1
 
 CHENXIAOLONG_PK='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 GIT_PUSH_RETRIES=10
+# GitHub refuses release assets of 2 GiB or more
+MAX_ASSET_BYTES=$((2 * 1024 * 1024 * 1024 - 1))
+
+PREINSTALL_ARGS=()
 
 set -o nounset -o pipefail -o errexit
 
@@ -323,6 +331,87 @@ function downloadAndVerifyFromChenxiaolong() {
   fi
 }
 
+function githubApi() {
+  local params=("-H" "Accept: application/vnd.github+json")
+
+  if [[ -n "${GITHUB_TOKEN}" ]]; then
+    params+=("-H" "Authorization: token ${GITHUB_TOKEN}")
+  fi
+
+  curl --fail -sL "${params[@]}" "https://api.github.com/$1"
+}
+
+# Prints the SHA-256 of the certificate an APK is signed with. Prints nothing if the APK does not verify,
+# or is signed by more than one certificate.
+function apkCertDigest() {
+  local output digests
+
+  # apksigner's exit code is not reliable across versions, so only its output is trusted
+  output=$(apksigner verify --verbose --print-certs "$1" 2>/dev/null </dev/null || true)
+  if ! grep -qx 'Verifies' <<<"$output"; then
+    return
+  fi
+
+  digests=$(sed -n 's/.*certificate SHA-256 digest: \([0-9a-f]\{64\}\)$/\1/p' <<<"$output" | sort -u)
+  if [[ -n "$digests" && "$(wc -l <<<"$digests")" -eq 1 ]]; then
+    echo "$digests"
+  fi
+}
+
+# Downloads the latest stable release of every app in preinstall/apps.conf. Versions float, the signer does not:
+# an APK only goes into the OTA if it is signed with the certificate pinned in apps.conf.
+function downloadPreinstallApps() {
+  PREINSTALL_ARGS=()
+
+  if [[ "$SKIP_PREINSTALL" == 'true' ]]; then
+    printGreen "SKIP_PREINSTALL set, not adding apps or overlays to the OTA"
+    return
+  fi
+
+  if ! command -v apksigner >/dev/null; then
+    printRed "apksigner is needed to verify the apps in preinstall/apps.conf"
+    exit 1
+  fi
+
+  mkdir -p .tmp/preinstall
+
+  local name repo pattern cert release tag url file actual overlay
+  while read -r name repo pattern cert <&3; do
+    if [[ -z "$name" || "$name" == \#* ]]; then
+      continue
+    fi
+
+    release=$(githubApi "repos/$repo/releases/latest")
+    tag=$(jq -r '.tag_name' <<<"$release")
+    url=$(jq -r --arg pattern "$pattern" \
+      '[.assets[] | select(.name | test($pattern))] | if length == 1 then .[0].browser_download_url else empty end' <<<"$release")
+    if [[ -z "$url" ]]; then
+      printRed "Release $tag of $repo does not have exactly one asset matching $pattern"
+      exit 1
+    fi
+
+    file=".tmp/preinstall/$name-$tag.apk"
+    if [[ ! -f "$file" ]]; then
+      curl --fail -sLo "$file.part" "$url"
+      mv "$file.part" "$file"
+    fi
+
+    actual=$(apkCertDigest "$file")
+    if [[ "$actual" != "$cert" ]]; then
+      printRed "$name $tag is signed by '${actual}', expected $cert. Not adding it to the OTA."
+      exit 1
+    fi
+
+    print "Preinstalling $name $tag from $repo"
+    PREINSTALL_ARGS+=("--preinstall-app" "$name=$file")
+  done 3<preinstall/apps.conf
+
+  for overlay in preinstall/overlay/*.apk; do
+    print "Preinstalling overlay $overlay"
+    PREINSTALL_ARGS+=("--preinstall-overlay" "$overlay")
+  done
+}
+
 function patchOTAs() {
 
   downloadAvBroot
@@ -339,6 +428,8 @@ function patchOTAs() {
     git clone https://github.com/chenxiaolong/my-avbroot-setup .tmp/my-avbroot-setup
     (cd .tmp/my-avbroot-setup && git checkout ${PATCH_PY_COMMIT})
   fi
+
+  downloadPreinstallApps
 
   base642key
 
@@ -379,24 +470,36 @@ function patchOTAs() {
       fi
       # We create csig and device JSON for OTA later if necessary
       args+=("--skip-custota-tool")
+      args+=("${PREINSTALL_ARGS[@]}")
 
-      # We need to add .tmp to PATH, but we can't use $PATH: because this would be the PATH of the host not the container
-      # Python image is designed to run as root, so chown the files it creates back at the end
-      # ... room for improvement 😐️
-      # shellcheck disable=SC2046
-      docker run --rm -i $(tty &>/dev/null && echo '-t') \
-    -v "$PWD:/app" \
-    -w /app \
-    -e PATH='/bin:/usr/local/bin:/sbin:/usr/bin:/app/.tmp' \
-    --env-file <(env) \
-    python:${PYTHON_VERSION} sh -c "set -e && \
-        apk add --no-cache openssh uv && \
-        uv sync --locked --project .tmp/my-avbroot-setup && \
-        uv run --project .tmp/my-avbroot-setup \
-            .tmp/my-avbroot-setup/patch.py ${args[*]} && \
-        chown -R $(id -u):$(id -g) .tmp"
+      if [[ "$PATCH_NATIVE" == 'true' ]]; then
+        PATH="$PWD/.tmp:$PATH" python3 preinstall/run_patch.py "${args[@]}"
+      else
+        # We need to add .tmp to PATH, but we can't use $PATH: because this would be the PATH of the host not the container
+        # Python image is designed to run as root, so chown the files it creates back at the end
+        # ... room for improvement 😐️
+        # shellcheck disable=SC2046
+        docker run --rm -i $(tty &>/dev/null && echo '-t') \
+      -v "$PWD:/app" \
+      -w /app \
+      -e PATH='/bin:/usr/local/bin:/sbin:/usr/bin:/app/.tmp' \
+      --env-file <(env) \
+      python:${PYTHON_VERSION} sh -c "set -e && \
+          apk add --no-cache openssh uv && \
+          uv sync --locked --project .tmp/my-avbroot-setup && \
+          uv run --project .tmp/my-avbroot-setup \
+              preinstall/run_patch.py ${args[*]} && \
+          chown -R $(id -u):$(id -g) .tmp"
+      fi
 
-      printGreen "Finished patching file ${targetFile}"
+      local size
+      size=$(stat -c %s "$targetFile")
+      if ((size > MAX_ASSET_BYTES)); then
+        printRed "$targetFile is $size bytes. GitHub only takes release assets below 2 GiB."
+        exit 1
+      fi
+
+      printGreen "Finished patching file ${targetFile} ($size bytes)"
     fi
     
   done
