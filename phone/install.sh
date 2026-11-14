@@ -25,6 +25,10 @@ AVB_KEY="$project/public/avb_pkmd.bin"
 OTA_CERT="$project/public/ota.crt"
 # From https://grapheneos.org/install/cli
 GRAPHENEOS_SIGNER='contact@grapheneos.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUg/m5CoP83b0rfSCzYSVA4cw4ir49io5GPoxbgxdJE'
+# avbroot's fastboot set only covers what avbroot itself patches, which leaves out vendor and product. The build
+# changes both, and a slot that mixes them with the stock images fails verity before Android starts. Flashing
+# every dynamic partition keeps that true whatever a later build touches.
+DYNAMIC=(product vendor system_ext system_dlkm vendor_dlkm)
 
 mkdir -p "$WORK"
 
@@ -146,7 +150,7 @@ wait_authorized() {
 }
 
 need_files() {
-  if [[ ! -f "$WORK/version" || ! -f "$WORK/ota" ]]; then
+  if [[ ! -f "$WORK/version" || ! -f "$WORK/ota" || ! -d "$WORK/extracted-dynamic" ]]; then
     fail "Run the fetch stage first."
   fi
   VERSION=$(<"$WORK/version")
@@ -177,7 +181,7 @@ download() {
 }
 
 stage_fetch() {
-  local info url version factory
+  local info url version factory partition extract=()
 
   echo "start: downloading and checking the install files, about four gigabytes"
 
@@ -209,10 +213,15 @@ stage_fetch() {
     --public-key-avb "$AVB_KEY" --cert-ota "$OTA_CERT" ||
     fail "The patched update is not signed with the keys in $project/public."
 
-  rm -rf "${WORK:?}/$factory" "$WORK/extracted"
+  rm -rf "${WORK:?}/$factory" "$WORK/extracted" "$WORK/extracted-dynamic"
   quiet unzip -q "$WORK/$factory.zip" -d "$WORK"
   quiet "$WORK/.tmp/avbroot" ota extract --input "$WORK/$(basename "$url")" \
     --directory "$WORK/extracted" --fastboot
+  for partition in "${DYNAMIC[@]}"; do
+    extract+=(--partition "$partition")
+  done
+  quiet "$WORK/.tmp/avbroot" ota extract --input "$WORK/$(basename "$url")" \
+    --directory "$WORK/extracted-dynamic" "${extract[@]}"
 
   echo "$version" >"$WORK/version"
   echo "$WORK/$(basename "$url")" >"$WORK/ota"
@@ -290,6 +299,8 @@ report_app() {
 }
 
 stage_patched() {
+  local partition
+
   need_files
 
   if [[ "$(mode)" == device ]]; then
@@ -302,6 +313,15 @@ stage_patched() {
 
   ANDROID_PRODUCT_OUT="$WORK/extracted" quiet fastboot flashall --skip-reboot ||
     fail "Flashing the patched system failed. The phone is still unlocked. The stock stage puts plain GrapheneOS back."
+  # Dynamic partitions can only be written from the fastboot that runs inside recovery
+  if [[ "$(mode)" != fastbootd ]]; then
+    quiet fastboot reboot fastboot
+    wait_mode 120 fastbootd || fail "The phone did not enter the second fastboot mode."
+  fi
+  for partition in "${DYNAMIC[@]}"; do
+    quiet fastboot flash "$partition" "$WORK/extracted-dynamic/$partition.img" ||
+      fail "Flashing $partition failed. The phone is still unlocked. The stock stage puts plain GrapheneOS back."
+  done
   quiet fastboot reboot-bootloader
   wait_mode 120 bootloader || fail "The phone did not come back to the bootloader."
   quiet fastboot erase avb_custom_key
