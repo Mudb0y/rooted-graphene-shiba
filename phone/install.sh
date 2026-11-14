@@ -4,9 +4,8 @@
 #
 #   fetch, bootloader, stock, patched, lock
 #
-# "sideload" is optional, between patched and lock: it rehearses an update
-# through recovery. "status" reports what the phone is doing right now. Output
-# from the tools goes to the log, so the terminal only carries what needs hearing.
+# "status" reports what the phone is doing right now. Output from the tools
+# goes to the log, so the terminal only carries what needs hearing.
 
 set -euo pipefail
 
@@ -153,11 +152,10 @@ wait_authorized() {
 }
 
 need_files() {
-  if [[ ! -f "$WORK/version" || ! -f "$WORK/ota" || ! -d "$WORK/extracted-rest" ]]; then
+  if [[ ! -f "$WORK/version" || ! -d "$WORK/extracted-rest" ]]; then
     fail "Run the fetch stage first."
   fi
   VERSION=$(<"$WORK/version")
-  OTA=$(<"$WORK/ota")
   FACTORY="$WORK/$DEVICE-install-$VERSION"
 }
 
@@ -227,7 +225,6 @@ stage_fetch() {
     --directory "$WORK/extracted-rest" "${extract[@]}"
 
   echo "$version" >"$WORK/version"
-  echo "$WORK/$(basename "$url")" >"$WORK/ota"
 
   echo "result: GrapheneOS $version and the $FLAVOR update are downloaded and verified"
 }
@@ -360,50 +357,6 @@ stage_patched() {
   echo "result: the patched system runs. If SandFly and your voices work, run the lock stage next."
 }
 
-stage_sideload() {
-  local before after status attempt
-
-  need_files
-
-  if [[ "$(mode)" != device ]]; then
-    fail "The phone has to be running with USB debugging on. Run the status stage to hear what it is doing."
-  fi
-  before=$(adb_prop ro.boot.slot_suffix)
-
-  echo "start: sideloading the full update, about ten minutes, leave the phone alone"
-
-  quiet adb reboot sideload-auto-reboot
-  wait_mode 180 sideload || fail "The phone did not enter sideload mode."
-  # adb reports an error when the phone reboots at the end, so the slot check below decides
-  quiet adb sideload "$OTA" || true
-
-  wait_booted 1500 ||
-    fail "The phone did not come back within twenty five minutes. Run the status stage to hear what it is doing."
-  after=$(adb_prop ro.boot.slot_suffix)
-  if [[ "$after" == "$before" ]]; then
-    fail "The phone is still on slot $before, so the update was not applied. Recovery's reason is on the phone's screen only."
-  fi
-  echo "The update is applied and the phone now runs from slot $after. Waiting for Android to finish merging it."
-
-  # Locking wipes the phone, which must not happen in the middle of the merge.
-  # The merge only runs while Android is up, and only the bootloader reports its state.
-  for attempt in 1 2 3 4 5 6; do
-    sleep 240
-    quiet adb reboot bootloader
-    wait_mode 120 bootloader || fail "The phone did not reach the bootloader."
-    status=$(fb_var snapshot-update-status)
-    log "snapshot-update-status: $status (attempt $attempt)"
-    if [[ "$status" == none ]]; then
-      echo "result: the update is fully applied and the phone is waiting in the bootloader. Run the lock stage next."
-      return
-    fi
-    quiet fastboot reboot
-    wait_booted 900 || fail "The phone did not start again."
-  done
-
-  fail "Android has not finished merging the update after half an hour."
-}
-
 stage_lock() {
   local ability status deadline current
 
@@ -476,12 +429,12 @@ stage_status() {
 }
 
 case "${1:-}" in
-  fetch | bootloader | stock | patched | sideload | lock | status)
+  fetch | bootloader | stock | patched | lock | status)
     log "=== stage $1"
     "stage_$1"
     ;;
   *)
-    echo "usage: $0 fetch|bootloader|stock|patched|sideload|lock|status"
+    echo "usage: $0 fetch|bootloader|stock|patched|lock|status"
     exit 1
     ;;
 esac
