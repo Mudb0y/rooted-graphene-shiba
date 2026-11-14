@@ -1,0 +1,10 @@
+# The magisk domain only exists in a Magisk-patched image, and is the one Magisk's own boot hooks run in
+service magisk_app /system/bin/sh /system/etc/magisk-app/install.sh
+    user root
+    group root
+    seclabel u:r:magisk:s0
+    oneshot
+    disabled
+
+on property:sys.boot_completed=1
+    start magisk_app

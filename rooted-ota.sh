@@ -88,7 +88,7 @@ SKIP_OTA_SERVER_UPLOAD=${SKIP_OTA_SERVER_UPLOAD:-'false'}
 SKIP_MODULES=${SKIP_MODULES:-'false'}
 # Upload OTA to test folder on OTA server
 UPLOAD_TEST_OTA=${UPLOAD_TEST_OTA:-false}
-# Skip adding the apps listed in preinstall/apps.conf and the overlays in preinstall/overlay to the OTA
+# Skip adding the apps listed in preinstall/apps.conf, the overlays in preinstall/overlay and the Magisk app to the OTA
 SKIP_PREINSTALL=${SKIP_PREINSTALL:-'false'}
 # Run the patch step with the host's python3 instead of in docker. Needs pydantic and tomlkit.
 PATCH_NATIVE=${PATCH_NATIVE:-'false'}
@@ -506,13 +506,20 @@ function patchOTAs() {
       args+=("--sign-key-avb" "$KEY_AVB")
       args+=("--sign-key-ota" "$KEY_OTA")
       args+=("--sign-cert-ota" "$CERT_OTA")
+      local magiskApk=''
       if [[ "$flavor" == 'magisk' ]]; then
-        args+=("--patch-arg=--magisk" "--patch-arg" ".tmp/magisk-$MAGISK_VERSION.apk")
-        args+=("--patch-arg=--magisk-preinit-device" "--patch-arg" "$MAGISK_PREINIT_DEVICE")
+        magiskApk=".tmp/magisk-$MAGISK_VERSION.apk"
       fi
       if [[ "$flavor" == 'pixincreate' ]]; then
-        args+=("--patch-arg=--magisk" "--patch-arg" ".tmp/pixincreate-$PIXINCREATE_VERSION.apk")
+        magiskApk=".tmp/pixincreate-$PIXINCREATE_VERSION.apk"
+      fi
+      if [[ -n "$magiskApk" ]]; then
+        args+=("--patch-arg=--magisk" "--patch-arg" "$magiskApk")
         args+=("--patch-arg=--magisk-preinit-device" "--patch-arg" "$MAGISK_PREINIT_DEVICE")
+        # The same file the boot image is patched with, so the app on the phone always matches the Magisk underneath
+        if [[ "$SKIP_PREINSTALL" != 'true' ]]; then
+          args+=("--preinstall-magisk-app" "$magiskApk")
+        fi
       fi
 
       # If env vars not set, passphrases will be queried interactively
