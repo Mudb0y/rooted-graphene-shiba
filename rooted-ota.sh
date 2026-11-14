@@ -45,13 +45,26 @@ OTA_VERSION=${OTA_VERSION:-'latest'}
 # curl --fail -sL -I -o /dev/null -w '%{url_effective}' https://github.com/topjohnwu/Magisk/releases/latest | sed 's/.*\/tag\///;'
 # renovate: datasource=github-releases packageName=topjohnwu/Magisk versioning=semver-coerced
 DEFAULT_MAGISK_VERSION=v31.1
+DEFAULT_MAGISK_SHA256=89cefac0a318afa39fb3880c45c87b036c05bc1ebf02a7a715b7f8d7c26ac6e7
 MAGISK_VERSION=${MAGISK_VERSION:-${DEFAULT_MAGISK_VERSION}}
 
 # Version of pixincreate's magisk fork. Its tags don't always match upstream magisk's, e.g. v31.0-3.
 # Find latest version here: https://github.com/pixincreate/Magisk/releases
 # renovate: datasource=github-releases packageName=pixincreate/Magisk versioning=semver-coerced
 DEFAULT_PIXINCREATE_VERSION=v31.0-3
+DEFAULT_PIXINCREATE_SHA256=ddcd10e42b11e233507f4720c5377f17e6471d27c46c20dba4cbc7afc9355cbc
 PIXINCREATE_VERSION=${PIXINCREATE_VERSION:-${DEFAULT_PIXINCREATE_VERSION}}
+
+# Magisk ends up in the boot chain with root, and its releases carry no signature this build could check, so the
+# APK has to be the exact file that was pinned. A version other than the default needs its own hash passed in.
+MAGISK_SHA256=${MAGISK_SHA256:-}
+if [[ -z "$MAGISK_SHA256" && "$MAGISK_VERSION" == "$DEFAULT_MAGISK_VERSION" ]]; then
+  MAGISK_SHA256=$DEFAULT_MAGISK_SHA256
+fi
+PIXINCREATE_SHA256=${PIXINCREATE_SHA256:-}
+if [[ -z "$PIXINCREATE_SHA256" && "$PIXINCREATE_VERSION" == "$DEFAULT_PIXINCREATE_VERSION" ]]; then
+  PIXINCREATE_SHA256=$DEFAULT_PIXINCREATE_SHA256
+fi
 
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
 
@@ -92,6 +105,8 @@ CUSTOTA_VERSION=6.10
 PATCH_PY_COMMIT=394725b276a585bc93443dd49438b5ad3ae93588
 # renovate: datasource=docker packageName=python
 PYTHON_VERSION=3.15.2-alpine
+# The patch step runs in this image with the signing keys mounted, and a tag can be pointed at another image
+PYTHON_DIGEST=sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
 # renovate: datasource=github-releases packageName=chenxiaolong/OEMUnlockOnBoot versioning=semver-coerced
 OEMUNLOCKONBOOT_VERSION=1.4
 # renovate: datasource=github-releases packageName=chenxiaolong/afsr versioning=semver
@@ -148,6 +163,7 @@ function createRootedOta() {
   findLatestVersion
   checkBuildNecessary
   downloadAndroidDependencies
+  verifyGrapheneOta
   patchOTAs
 }
 
@@ -267,18 +283,62 @@ function downloadAndroidDependencies() {
   checkMandatoryVariable 'MAGISK_VERSION' 'OTA_TARGET'
 
   mkdir -p .tmp
-  if ! ls ".tmp/magisk-$MAGISK_VERSION.apk" >/dev/null 2>&1 && [[ "${POTENTIAL_ASSETS['magisk']+isset}" ]]; then
-    curl --fail -sLo ".tmp/magisk-$MAGISK_VERSION.apk" "https://github.com/topjohnwu/Magisk/releases/download/$MAGISK_VERSION/Magisk-$MAGISK_VERSION.apk"
+  if [[ "${POTENTIAL_ASSETS['magisk']+isset}" ]]; then
+    if ! ls ".tmp/magisk-$MAGISK_VERSION.apk" >/dev/null 2>&1; then
+      curl --fail -sLo ".tmp/magisk-$MAGISK_VERSION.apk" "https://github.com/topjohnwu/Magisk/releases/download/$MAGISK_VERSION/Magisk-$MAGISK_VERSION.apk"
+    fi
+    checkSha256 ".tmp/magisk-$MAGISK_VERSION.apk" "$MAGISK_SHA256"
   fi
 
   # pixincreate's fork releases its APK as "Magisk-<version>.apk"
-  if ! ls ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" >/dev/null 2>&1 && [[ "${POTENTIAL_ASSETS['pixincreate']+isset}" ]]; then
-    curl --fail -sLo ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" "https://github.com/pixincreate/Magisk/releases/download/$PIXINCREATE_VERSION/Magisk-$PIXINCREATE_VERSION.apk"
+  if [[ "${POTENTIAL_ASSETS['pixincreate']+isset}" ]]; then
+    if ! ls ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" >/dev/null 2>&1; then
+      curl --fail -sLo ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" "https://github.com/pixincreate/Magisk/releases/download/$PIXINCREATE_VERSION/Magisk-$PIXINCREATE_VERSION.apk"
+    fi
+    checkSha256 ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" "$PIXINCREATE_SHA256"
   fi
 
   if ! ls ".tmp/$OTA_TARGET.zip" >/dev/null 2>&1; then
     curl --fail -sLo ".tmp/$OTA_TARGET.zip" "$OTA_URL"
   fi
+}
+
+function checkSha256() {
+  local file="$1" expected="$2" actual
+
+  actual=$(sha256sum "$file" | cut -d' ' -f1)
+  if [[ -z "$expected" ]]; then
+    printRed "No SHA-256 is pinned for $file, which has $actual. Not using it."
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    printRed "$file has SHA-256 $actual, but $expected is pinned. Not using it."
+    rm -f "$file"
+    exit 1
+  fi
+}
+
+# The OTA arrives over plain HTTPS and leaves here signed with our keys, so nothing downstream would notice a
+# tampered one. grapheneos/<device> holds GrapheneOS's verified boot key from their signed factory image, whose
+# SHA-256 is the key hash listed on https://grapheneos.org/install/web, and the certificate their OTAs are signed
+# with. avbroot also checks that this certificate is the one the recovery inside the OTA trusts.
+function verifyGrapheneOta() {
+  local keys="grapheneos/$DEVICE_ID"
+
+  if [[ ! -f "$keys/avb_pkmd.bin" || ! -f "$keys/ota.crt" ]]; then
+    printRed "$keys does not hold GrapheneOS's keys for $DEVICE_ID, so the OTA cannot be verified."
+    exit 1
+  fi
+
+  downloadAvBroot
+
+  if ! .tmp/avbroot ota verify --input ".tmp/$OTA_TARGET.zip" \
+    --public-key-avb "$keys/avb_pkmd.bin" --cert-ota "$keys/ota.crt"; then
+    printRed ".tmp/$OTA_TARGET.zip is not signed with GrapheneOS's keys. Not patching it."
+    rm -f ".tmp/$OTA_TARGET.zip"
+    exit 1
+  fi
+  printGreen "$OTA_TARGET is signed with GrapheneOS's keys"
 }
 
 function findLatestVersion() {
@@ -484,7 +544,7 @@ function patchOTAs() {
       -w /app \
       -e PATH='/bin:/usr/local/bin:/sbin:/usr/bin:/app/.tmp' \
       --env-file <(env) \
-      python:${PYTHON_VERSION} sh -c "set -e && \
+      "python:${PYTHON_VERSION}@${PYTHON_DIGEST}" sh -c "set -e && \
           apk add --no-cache openssh uv && \
           uv sync --locked --project .tmp/my-avbroot-setup && \
           uv run --project .tmp/my-avbroot-setup \
