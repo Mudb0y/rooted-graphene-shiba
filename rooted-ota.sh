@@ -39,32 +39,18 @@ SKIP_PIXINCREATE=${SKIP_PIXINCREATE:-'true'}
 # https://grapheneos.org/releases#stable-channel
 OTA_VERSION=${OTA_VERSION:-'latest'}
 
-# It's recommended to pin magisk version in combination with AVB_ROOT_VERSION.
-# Breaking changes in magisk might need to be adapted in new avbroot version
-# Find latest magisk version here: https://github.com/topjohnwu/Magisk/releases, or:
-# curl --fail -sL -I -o /dev/null -w '%{url_effective}' https://github.com/topjohnwu/Magisk/releases/latest | sed 's/.*\/tag\///;'
-# renovate: datasource=github-releases packageName=topjohnwu/Magisk versioning=semver-coerced
-DEFAULT_MAGISK_VERSION=v31.1
-DEFAULT_MAGISK_SHA256=89cefac0a318afa39fb3880c45c87b036c05bc1ebf02a7a715b7f8d7c26ac6e7
-MAGISK_VERSION=${MAGISK_VERSION:-${DEFAULT_MAGISK_VERSION}}
+# Magisk and pixincreate's fork follow their newest release that is not marked as a pre-release, so every build
+# patches with whatever is current when a GrapheneOS release comes out. Naming a tag here, e.g. v31.1, holds one
+# back. A new Magisk can need a new avbroot, which is why avbroot follows its releases as well.
+MAGISK_VERSION=${MAGISK_VERSION:-latest}
+# The fork's tags don't always match upstream magisk's, e.g. v31.0-3
+PIXINCREATE_VERSION=${PIXINCREATE_VERSION:-latest}
 
-# Version of pixincreate's magisk fork. Its tags don't always match upstream magisk's, e.g. v31.0-3.
-# Find latest version here: https://github.com/pixincreate/Magisk/releases
-# renovate: datasource=github-releases packageName=pixincreate/Magisk versioning=semver-coerced
-DEFAULT_PIXINCREATE_VERSION=v31.0-3
-DEFAULT_PIXINCREATE_SHA256=ddcd10e42b11e233507f4720c5377f17e6471d27c46c20dba4cbc7afc9355cbc
-PIXINCREATE_VERSION=${PIXINCREATE_VERSION:-${DEFAULT_PIXINCREATE_VERSION}}
-
-# Magisk ends up in the boot chain with root, and its releases carry no signature this build could check, so the
-# APK has to be the exact file that was pinned. A version other than the default needs its own hash passed in.
-MAGISK_SHA256=${MAGISK_SHA256:-}
-if [[ -z "$MAGISK_SHA256" && "$MAGISK_VERSION" == "$DEFAULT_MAGISK_VERSION" ]]; then
-  MAGISK_SHA256=$DEFAULT_MAGISK_SHA256
-fi
-PIXINCREATE_SHA256=${PIXINCREATE_SHA256:-}
-if [[ -z "$PIXINCREATE_SHA256" && "$PIXINCREATE_VERSION" == "$DEFAULT_PIXINCREATE_VERSION" ]]; then
-  PIXINCREATE_SHA256=$DEFAULT_PIXINCREATE_SHA256
-fi
+# Magisk ends up in the boot chain with root, and nothing but the APK's own signature says who a release is from.
+# An APK is only used if it is signed with the certificate every release so far was signed with: John Wu's for
+# Magisk, pixincreate's for the fork.
+MAGISK_SIGNER=b4cb83b4dad99f997dbe872f013aa16c14eec41d167021f371f7e1330f273ee6
+PIXINCREATE_SIGNER=0c523d37aca12a8086583c2d38231925642d9ed35f657a2914c52e014d1d0a18
 
 SKIP_CLEANUP=${SKIP_CLEANUP:-''}
 
@@ -97,20 +83,21 @@ OTA_CHANNEL=${OTA_CHANNEL:-stable-security-preview} # Alternative: 'stable' or '
 NO_COLOR=${NO_COLOR:-''}
 OTA_BASE_URL="https://releases.grapheneos.org"
 
-# renovate: datasource=github-releases packageName=chenxiaolong/avbroot versioning=semver
-AVB_ROOT_VERSION=3.39.1
-# renovate: datasource=github-releases packageName=chenxiaolong/Custota versioning=semver-coerced
-CUSTOTA_VERSION=6.10
-# renovate: datasource=git-refs packageName=https://github.com/chenxiaolong/my-avbroot-setup currentValue=master
-PATCH_PY_COMMIT=394725b276a585bc93443dd49438b5ad3ae93588
+# chenxiaolong's tools follow their newest release too. Naming a version without its leading v, e.g. 3.39.1,
+# holds one back. Whatever the version, nothing of his is used unless it is signed with CHENXIAOLONG_PK.
+AVB_ROOT_VERSION=${AVB_ROOT_VERSION:-latest}
+CUSTOTA_VERSION=${CUSTOTA_VERSION:-latest}
+OEMUNLOCKONBOOT_VERSION=${OEMUNLOCKONBOOT_VERSION:-latest}
+AFSR_VERSION=${AFSR_VERSION:-latest}
+# my-avbroot-setup has no releases, so "latest" is the newest commit on its main branch that he signed. A commit
+# named here is taken as it is.
+PATCH_PY_COMMIT=${PATCH_PY_COMMIT:-latest}
+# The Python image stays pinned. It never reaches the phone, the pinned one keeps working, and my-avbroot-setup
+# locks its dependencies to the Python versions that existed when it was last updated.
 # renovate: datasource=docker packageName=python
 PYTHON_VERSION=3.15.2-alpine
 # The patch step runs in this image with the signing keys mounted, and a tag can be pointed at another image
 PYTHON_DIGEST=sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd
-# renovate: datasource=github-releases packageName=chenxiaolong/OEMUnlockOnBoot versioning=semver-coerced
-OEMUNLOCKONBOOT_VERSION=1.4
-# renovate: datasource=github-releases packageName=chenxiaolong/afsr versioning=semver
-AFSR_VERSION=2.1.1
 
 CHENXIAOLONG_PK='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDOe6/tBnO7xZhAWXRj3ApUYgn+XZ0wnQiXM8B7tPgv4'
 GIT_PUSH_RETRIES=10
@@ -284,18 +271,12 @@ function downloadAndroidDependencies() {
 
   mkdir -p .tmp
   if [[ "${POTENTIAL_ASSETS['magisk']+isset}" ]]; then
-    if ! ls ".tmp/magisk-$MAGISK_VERSION.apk" >/dev/null 2>&1; then
-      curl --fail -sLo ".tmp/magisk-$MAGISK_VERSION.apk" "https://github.com/topjohnwu/Magisk/releases/download/$MAGISK_VERSION/Magisk-$MAGISK_VERSION.apk"
-    fi
-    checkSha256 ".tmp/magisk-$MAGISK_VERSION.apk" "$MAGISK_SHA256"
+    downloadMagisk topjohnwu/Magisk "$MAGISK_VERSION" ".tmp/magisk-$MAGISK_VERSION.apk" "$MAGISK_SIGNER"
   fi
 
-  # pixincreate's fork releases its APK as "Magisk-<version>.apk"
   if [[ "${POTENTIAL_ASSETS['pixincreate']+isset}" ]]; then
-    if ! ls ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" >/dev/null 2>&1; then
-      curl --fail -sLo ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" "https://github.com/pixincreate/Magisk/releases/download/$PIXINCREATE_VERSION/Magisk-$PIXINCREATE_VERSION.apk"
-    fi
-    checkSha256 ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" "$PIXINCREATE_SHA256"
+    downloadMagisk pixincreate/Magisk "$PIXINCREATE_VERSION" ".tmp/pixincreate-$PIXINCREATE_VERSION.apk" \
+      "$PIXINCREATE_SIGNER"
   fi
 
   if ! ls ".tmp/$OTA_TARGET.zip" >/dev/null 2>&1; then
@@ -303,19 +284,52 @@ function downloadAndroidDependencies() {
   fi
 }
 
-function checkSha256() {
-  local file="$1" expected="$2" actual
+# Magisk and the fork both release their APK as "Magisk-<tag>.apk"
+function downloadMagisk() {
+  local repo="$1" version="$2" file="$3" signer="$4" actual
+  local url="https://github.com/$repo/releases/download/$version/Magisk-$version.apk"
 
-  actual=$(sha256sum "$file" | cut -d' ' -f1)
-  if [[ -z "$expected" ]]; then
-    printRed "No SHA-256 is pinned for $file, which has $actual. Not using it."
+  if ! command -v apksigner >/dev/null; then
+    printRed "apksigner is needed to check who signed Magisk"
     exit 1
   fi
-  if [[ "$actual" != "$expected" ]]; then
-    printRed "$file has SHA-256 $actual, but $expected is pinned. Not using it."
+
+  if [[ ! -f "$file" ]]; then
+    if ! curl --fail -sLo "$file.part" "$url"; then
+      printRed "Cannot download $url"
+      exit 1
+    fi
+    mv "$file.part" "$file"
+  fi
+
+  actual=$(apkCertDigest "$file")
+  if [[ "$actual" != "$signer" ]]; then
+    printRed "$file is signed by '${actual}', expected $signer. Not using it."
     rm -f "$file"
     exit 1
   fi
+  print "Magisk $version from $repo is signed by its maintainer"
+}
+
+# Replaces "latest" in the named variable with the tag of the repo's newest release, without the prefix given
+# as third argument. GitHub leaves drafts and pre-releases out of "latest". Anything else in the variable is a
+# version somebody named, and stays.
+function resolveLatest() {
+  local -n resolved="$1"
+  local repo="$2" prefix="${3:-}" url
+
+  if [[ "$resolved" != 'latest' ]]; then
+    return
+  fi
+
+  url=$(curl --fail -sL -I -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")
+  if [[ "$url" != */releases/tag/?* ]]; then
+    printRed "Cannot tell the latest release of $repo from $url"
+    exit 1
+  fi
+  resolved=${url##*/releases/tag/}
+  resolved=${resolved#"$prefix"}
+  print "Latest release of $repo: $resolved"
 }
 
 # The OTA arrives over plain HTTPS and leaves here signed with our keys, so nothing downstream would notice a
@@ -344,10 +358,12 @@ function verifyGrapheneOta() {
 function findLatestVersion() {
   checkMandatoryVariable DEVICE_ID
 
-  if [[ "$MAGISK_VERSION" == 'latest' ]]; then
-    MAGISK_VERSION=$(curl --fail -sL -I -o /dev/null -w '%{url_effective}' https://github.com/topjohnwu/Magisk/releases/latest | sed 's/.*\/tag\///;')
-  fi
+  resolveLatest MAGISK_VERSION topjohnwu/Magisk
   print "Magisk version: $MAGISK_VERSION"
+  if [[ "$SKIP_PIXINCREATE" != 'true' ]]; then
+    resolveLatest PIXINCREATE_VERSION pixincreate/Magisk
+    print "pixincreate version: $PIXINCREATE_VERSION"
+  fi
 
   # Search for a new version grapheneos.
   # e.g. https://releases.grapheneos.org/shiba-stable
@@ -363,6 +379,7 @@ function findLatestVersion() {
 }
 
 function downloadAvBroot() {
+  resolveLatest AVB_ROOT_VERSION chenxiaolong/avbroot v
   downloadAndVerifyFromChenxiaolong 'avbroot' "$AVB_ROOT_VERSION"
 }
 
@@ -389,6 +406,33 @@ function downloadAndVerifyFromChenxiaolong() {
     rm "${downloadedZipFile}"*
     chmod +x ".tmp/${artifact}" # e.g. .tmp/custota-tool
   fi
+}
+
+# Puts .tmp/my-avbroot-setup on the commit to patch with. The patch script runs with the signing keys in reach,
+# and a branch can be moved by whoever gets into the GitHub account, so "latest" goes no further than the newest
+# commit that carries the author's own signature. That signature covers everything the commit is built on.
+function checkoutPatchScript() {
+  local repo=.tmp/my-avbroot-setup signers=.tmp/chenxiaolong.signers commit='' candidate
+
+  if [[ "$PATCH_PY_COMMIT" != 'latest' ]]; then
+    git -C "$repo" checkout --quiet "$PATCH_PY_COMMIT"
+    return
+  fi
+
+  echo "chenxiaolong $CHENXIAOLONG_PK" >"$signers"
+  for candidate in $(git -C "$repo" rev-list -n 50 HEAD); do
+    if git -C "$repo" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$PWD/$signers" \
+      verify-commit "$candidate" >/dev/null 2>&1; then
+      commit=$candidate
+      break
+    fi
+  done
+  if [[ -z "$commit" ]]; then
+    printRed "None of the last 50 commits of my-avbroot-setup is signed by its author. Not using it."
+    exit 1
+  fi
+  git -C "$repo" checkout --quiet "$commit"
+  print "Patch script: my-avbroot-setup at $commit"
 }
 
 function githubApi() {
@@ -475,18 +519,22 @@ function downloadPreinstallApps() {
 function patchOTAs() {
 
   downloadAvBroot
+  resolveLatest AFSR_VERSION chenxiaolong/afsr v
   downloadAndVerifyFromChenxiaolong 'afsr' "$AFSR_VERSION"
+  # The patch script checks both of these zips against their .sig before it uses them
+  resolveLatest CUSTOTA_VERSION chenxiaolong/Custota v
   if ! ls ".tmp/custota.zip" >/dev/null 2>&1; then
     curl --fail -sL "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/Custota-${CUSTOTA_VERSION}-release.zip" > .tmp/custota.zip
     curl --fail -sL "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/Custota-${CUSTOTA_VERSION}-release.zip.sig" > .tmp/custota.zip.sig
   fi
+  resolveLatest OEMUNLOCKONBOOT_VERSION chenxiaolong/OEMUnlockOnBoot v
   if ! ls ".tmp/oemunlockonboot.zip" >/dev/null 2>&1; then
     curl --fail -sL "https://github.com/chenxiaolong/OEMUnlockOnBoot/releases/download/v${OEMUNLOCKONBOOT_VERSION}/OEMUnlockOnBoot-${OEMUNLOCKONBOOT_VERSION}-release.zip" > .tmp/oemunlockonboot.zip
     curl --fail -sL "https://github.com/chenxiaolong/OEMUnlockOnBoot/releases/download/v${OEMUNLOCKONBOOT_VERSION}/OEMUnlockOnBoot-${OEMUNLOCKONBOOT_VERSION}-release.zip.sig" > .tmp/oemunlockonboot.zip.sig
   fi
   if ! ls ".tmp/my-avbroot-setup" >/dev/null 2>&1; then
     git clone https://github.com/chenxiaolong/my-avbroot-setup .tmp/my-avbroot-setup
-    (cd .tmp/my-avbroot-setup && git checkout ${PATCH_PY_COMMIT})
+    checkoutPatchScript
   fi
 
   downloadPreinstallApps
@@ -706,6 +754,7 @@ function createOtaServerData() {
 }
 
 function downloadCusotaTool() {
+  resolveLatest CUSTOTA_VERSION chenxiaolong/Custota v
   downloadAndVerifyFromChenxiaolong 'Custota' "$CUSTOTA_VERSION" 'custota-tool'
 }
 
