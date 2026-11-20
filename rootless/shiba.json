@@ -1,7 +1,7 @@
 {
   "version": 2,
   "full": {
-    "location_ota": "https://github.com/Mudb0y/rooted-graphene-shiba/releases/download/2026111301/shiba-2026111301-3ceeca1-rootless.zip",
-    "location_csig": "https://github.com/Mudb0y/rooted-graphene-shiba/releases/download/2026111301/shiba-2026111301-3ceeca1-rootless.zip.csig"
+    "location_ota": "https://github.com/Mudb0y/rooted-graphene-shiba/releases/download/2026111801/shiba-2026111801-9f30419-rootless.zip",
+    "location_csig": "https://github.com/Mudb0y/rooted-graphene-shiba/releases/download/2026111801/shiba-2026111801-9f30419-rootless.zip.csig"
   }
 }
